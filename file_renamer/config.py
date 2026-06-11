@@ -76,25 +76,60 @@ class Rule:
 
 
 @dataclass
+class WatchDir:
+    path: str
+    label: str = ""
+    rules: Optional[List[Rule]] = None
+    ignored_patterns: Optional[List[str]] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], global_rules: List[Rule], global_ignored: List[str]) -> "WatchDir":
+        path = os.path.expandvars(os.path.expanduser(data["path"]))
+        if not os.path.isabs(path):
+            path = os.path.abspath(path)
+
+        label = data.get("label", os.path.basename(path))
+        rules = [Rule.from_dict(r) for r in data.get("rules", [])] if "rules" in data else None
+        ignored = data.get("ignored_patterns", None)
+
+        return cls(
+            path=path,
+            label=label,
+            rules=rules,
+            ignored_patterns=ignored,
+        )
+
+    def get_rules(self, global_rules: List[Rule]) -> List[Rule]:
+        rules = self.rules if self.rules is not None else global_rules
+        rules.sort(key=lambda r: r.priority)
+        return [r for r in rules if r.enabled]
+
+    def get_ignored_patterns(self, global_ignored: List[str]) -> List[str]:
+        return self.ignored_patterns if self.ignored_patterns is not None else global_ignored
+
+
+@dataclass
 class AppConfig:
-    watch_dir: str
-    log_file: str
-    history_file: str
-    rules: List[Rule] = field(default_factory=list)
+    watch_dirs: List[WatchDir] = field(default_factory=list)
+    global_rules: List[Rule] = field(default_factory=list)
+    log_file: str = ""
+    history_file: str = ""
     poll_interval: float = 1.0
     debounce_seconds: float = 2.0
     stability_checks: int = 3
     ignored_patterns: List[str] = field(default_factory=list)
     log_daily_rotate: bool = False
 
+    @property
+    def watch_dir(self) -> str:
+        if self.watch_dirs:
+            return self.watch_dirs[0].path
+        return ""
+
     @classmethod
     def from_file(cls, path: str) -> "AppConfig":
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
-
-        watch_dir = os.path.expandvars(os.path.expanduser(data["watch_dir"]))
-        if not os.path.isabs(watch_dir):
-            watch_dir = os.path.abspath(watch_dir)
 
         log_file = data.get("log_file", "./rename_operations.log")
         if not os.path.isabs(log_file):
@@ -104,20 +139,32 @@ class AppConfig:
         if not os.path.isabs(history_file):
             history_file = os.path.abspath(history_file)
 
-        rules = [Rule.from_dict(r) for r in data.get("rules", [])]
-        rules.sort(key=lambda r: r.priority)
+        global_rules = [Rule.from_dict(r) for r in data.get("rules", [])]
+        global_rules.sort(key=lambda r: r.priority)
+        global_ignored = data.get("ignored_patterns", [])
+
+        watch_dirs = []
+        if "watch_dirs" in data:
+            for wd_data in data["watch_dirs"]:
+                watch_dirs.append(WatchDir.from_dict(wd_data, global_rules, global_ignored))
+        elif "watch_dir" in data:
+            watch_dir_path = os.path.expandvars(os.path.expanduser(data["watch_dir"]))
+            if not os.path.isabs(watch_dir_path):
+                watch_dir_path = os.path.abspath(watch_dir_path)
+            watch_dirs.append(WatchDir(
+                path=watch_dir_path,
+                label=os.path.basename(watch_dir_path),
+                ignored_patterns=global_ignored,
+            ))
 
         return cls(
-            watch_dir=watch_dir,
+            watch_dirs=watch_dirs,
+            global_rules=global_rules,
             log_file=log_file,
             history_file=history_file,
-            rules=rules,
             poll_interval=data.get("poll_interval", 1.0),
             debounce_seconds=data.get("debounce_seconds", 2.0),
             stability_checks=data.get("stability_checks", 3),
-            ignored_patterns=data.get("ignored_patterns", []),
+            ignored_patterns=global_ignored,
             log_daily_rotate=data.get("log_daily_rotate", False),
         )
-
-    def get_enabled_rules(self) -> List[Rule]:
-        return [r for r in self.rules if r.enabled]

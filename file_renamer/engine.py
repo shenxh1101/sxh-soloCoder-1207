@@ -6,7 +6,7 @@ import datetime
 import time
 from typing import List, Optional, Tuple, Dict
 
-from .config import Rule, Condition
+from .config import Rule, Condition, WatchDir
 
 logger = logging.getLogger("file_renamer")
 
@@ -106,6 +106,18 @@ def _get_dominant_color_name(image_path: str) -> str:
         return "未知色"
 
 
+def _dir_matches(dirname: str, pattern: str) -> bool:
+    normalized = os.path.normpath(dirname).replace("\\", "/")
+    pattern_norm = pattern.replace("\\", "/")
+    parts = normalized.split("/")
+    for i in range(len(parts)):
+        if fnmatch.fnmatch("/".join(parts[i:]), pattern_norm):
+            return True
+        if fnmatch.fnmatch(parts[i], pattern_norm):
+            return True
+    return fnmatch.fnmatch(os.path.basename(dirname), pattern_norm)
+
+
 def _check_condition(condition: Condition, filepath: str, filename: str, ext: str) -> bool:
     if condition.type == "extension":
         if condition.values:
@@ -164,7 +176,7 @@ def _check_condition(condition: Condition, filepath: str, filename: str, ext: st
     elif condition.type == "source_dir":
         if condition.source_dir:
             dirname = os.path.dirname(filepath)
-            return fnmatch.fnmatch(os.path.basename(dirname), condition.source_dir)
+            return _dir_matches(dirname, condition.source_dir)
         return False
 
     return False
@@ -188,7 +200,26 @@ def find_matching_rule(filepath: str, rules: List[Rule]) -> Optional[Rule]:
     return None
 
 
-def preview_file(filepath: str, rules: List[Rule]) -> Optional[dict]:
+def scan_files_recursive(root_dir: str, ignored_patterns: List[str]) -> List[str]:
+    files = []
+    ignored = set()
+    for pattern in ignored_patterns:
+        for f in os.listdir(root_dir):
+            if fnmatch.fnmatch(f, pattern):
+                ignored.add(f)
+
+    for dirpath, _, filenames in os.walk(root_dir):
+        for fname in filenames:
+            if fname in ignored:
+                continue
+            full_path = os.path.join(dirpath, fname)
+            if os.path.isfile(full_path):
+                files.append(full_path)
+
+    return sorted(files)
+
+
+def preview_file(filepath: str, rules: List[Rule], watch_label: str = "") -> Optional[dict]:
     if not os.path.isfile(filepath):
         return None
 
@@ -208,6 +239,7 @@ def preview_file(filepath: str, rules: List[Rule]) -> Optional[dict]:
             "new_path": None,
             "will_change": False,
             "captures": {},
+            "watch_label": watch_label,
         }
 
     new_path = generate_new_name(filepath, rule)
@@ -224,6 +256,7 @@ def preview_file(filepath: str, rules: List[Rule]) -> Optional[dict]:
         "new_path": new_path,
         "will_change": os.path.normpath(new_path) != os.path.normpath(filepath),
         "captures": captures,
+        "watch_label": watch_label,
     }
 
 

@@ -7,6 +7,8 @@ import fnmatch
 import glob
 from typing import Optional, List, Dict, Any
 
+from collections import defaultdict
+
 
 def setup_logger(log_file: str, level: int = logging.INFO, daily_rotate: bool = False) -> logging.Logger:
     logger = logging.getLogger("file_renamer")
@@ -119,6 +121,7 @@ class OperationLogger:
         rule_name: str,
         success: bool,
         error: Optional[str] = None,
+        watch_label: str = "",
     ) -> str:
         operation_id = f"op_{int(time.time() * 1000000)}"
         record = {
@@ -132,6 +135,7 @@ class OperationLogger:
             "error": error,
             "rolled_back": False,
             "rolled_back_at": None,
+            "watch_label": watch_label,
         }
 
         records = self._read_records()
@@ -147,6 +151,14 @@ class OperationLogger:
         return records
 
     def get_successful_renames(self, count: Optional[int] = None) -> list:
+        records = self._collect_all_records(None, None)
+        successful = [r for r in records if r.get("success") and not r.get("rolled_back")]
+        successful.sort(key=lambda r: r.get("timestamp", ""))
+        if count is not None:
+            return successful[-count:]
+        return successful
+
+    def get_successful_renames_today(self, count: Optional[int] = None) -> list:
         records = self._read_records()
         successful = [r for r in records if r.get("success") and not r.get("rolled_back")]
         if count is not None:
@@ -206,6 +218,70 @@ class OperationLogger:
             records = records[:limit]
 
         return records
+
+    def get_statistics(
+        self,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        group_by: str = "rule",
+    ) -> List[Dict[str, Any]]:
+        records = self._collect_all_records(date_from, date_to)
+
+        if group_by == "date":
+            buckets = defaultdict(lambda: {"total": 0, "success": 0, "failed": 0, "rolled_back": 0})
+            for r in records:
+                date_key = r.get("date", "unknown")
+                buckets[date_key]["total"] += 1
+                if r.get("success") and not r.get("rolled_back"):
+                    buckets[date_key]["success"] += 1
+                elif r.get("rolled_back"):
+                    buckets[date_key]["rolled_back"] += 1
+                else:
+                    buckets[date_key]["failed"] += 1
+
+            result = []
+            for d in sorted(buckets.keys()):
+                b = buckets[d]
+                result.append({"group": d, **b})
+            return result
+
+        elif group_by == "rule":
+            buckets = defaultdict(lambda: {"total": 0, "success": 0, "failed": 0, "rolled_back": 0})
+            for r in records:
+                rule_key = r.get("rule", "unknown")
+                buckets[rule_key]["total"] += 1
+                if r.get("success") and not r.get("rolled_back"):
+                    buckets[rule_key]["success"] += 1
+                elif r.get("rolled_back"):
+                    buckets[rule_key]["rolled_back"] += 1
+                else:
+                    buckets[rule_key]["failed"] += 1
+
+            result = []
+            for rule_name in sorted(buckets.keys(), key=lambda k: -buckets[k]["total"]):
+                b = buckets[rule_name]
+                result.append({"group": rule_name, **b})
+            return result
+
+        elif group_by == "source":
+            buckets = defaultdict(lambda: {"total": 0, "success": 0, "failed": 0, "rolled_back": 0})
+            for r in records:
+                src_key = r.get("watch_label", "unknown")
+                buckets[src_key]["total"] += 1
+                if r.get("success") and not r.get("rolled_back"):
+                    buckets[src_key]["success"] += 1
+                elif r.get("rolled_back"):
+                    buckets[src_key]["rolled_back"] += 1
+                else:
+                    buckets[src_key]["failed"] += 1
+
+            result = []
+            for src in sorted(buckets.keys()):
+                b = buckets[src]
+                result.append({"group": src, **b})
+            return result
+
+        return []
 
     def _collect_all_records(self, date_from: Optional[str] = None, date_to: Optional[str] = None) -> list:
         if self._daily_rotate:

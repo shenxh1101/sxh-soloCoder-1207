@@ -16,8 +16,9 @@ class RollbackManager:
         return self._do_rollback(records, dry_run)
 
     def rollback_by_ids(self, operation_ids: List[str], dry_run: bool = False) -> List[dict]:
-        all_records = self._op_logger.get_records()
+        all_records = self._op_logger._collect_all_records(None, None)
         records = [r for r in all_records if r["operation_id"] in operation_ids and r.get("success") and not r.get("rolled_back")]
+        records.sort(key=lambda r: r.get("timestamp", ""))
         return self._do_rollback(records, dry_run)
 
     def _do_rollback(self, records: list, dry_run: bool) -> List[dict]:
@@ -126,6 +127,8 @@ class RollbackManager:
             print(f"    原始: {os.path.basename(r['original_path'])}")
             print(f"    重命名: {os.path.basename(r['new_path'])}")
             print(f"    规则: {r['rule']}")
+            if r.get("watch_label"):
+                print(f"    来源: {r['watch_label']}")
             if r.get("rolled_back_at"):
                 print(f"    回滚于: {r['rolled_back_at']}")
             print()
