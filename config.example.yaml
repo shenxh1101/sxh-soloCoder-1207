@@ -1,0 +1,85 @@
+# ===========================================
+# 文件更名器 - 配置文件
+# ===========================================
+
+# 要监控的文件夹路径
+watch_dir: "./test_watch"
+
+# 操作日志文件路径
+log_file: "./rename_operations.log"
+
+# operation history file for rollback
+history_file: "./rename_history.json"
+
+# 轮询间隔（秒）
+poll_interval: 1.0
+
+# 防抖时间（秒）- 文件创建后稳定等待时间
+debounce_seconds: 2.0
+
+# 忽略的文件名模式（glob 通配符）
+ignored_patterns:
+  - "*.tmp"
+  - "~*"
+  - ".DS_Store"
+  - "Thumbs.db"
+
+# ===========================================
+# 重命名规则（按 priority 从小到大匹配，越小越优先）
+# ===========================================
+rules:
+  # ---- 规则1: 截图文件按时间重命名 ----
+  - name: "截图按时间重命名"
+    priority: 1
+    enabled: true
+    conditions:
+      - type: "filename_pattern"
+        pattern: "截图*"
+      - type: "extension"
+        values: [".png", ".jpg", ".jpeg"]
+    rename_pattern: "截图_{datetime:%Y%m%d_%H%M%S}{ext}"
+
+  # ---- 规则2: 拼写变体截图 ----
+  - name: "QQ/微信截图按时间重命名"
+    priority: 2
+    enabled: true
+    conditions:
+      - type: "filename_pattern"
+        pattern: "QQ截图*"
+      - type: "extension"
+        values: [".png", ".jpg", ".jpeg"]
+    rename_pattern: "截图_{datetime:%Y%m%d_%H%M%S}{ext}"
+
+  # ---- 规则3: 图片添加主色调 ----
+  - name: "图片添加主色调"
+    priority: 10
+    enabled: true
+    conditions:
+      - type: "is_image"
+    rename_pattern: "{name}_{dominant_color}{ext}"
+
+  # ---- 规则4: 下载文件按日期整理 ----
+  - name: "下载文件添加日期前缀"
+    priority: 20
+    enabled: false
+    conditions:
+      - type: "filename_pattern"
+        pattern: "download*"
+    rename_pattern: "{date}_{original_name}"
+
+# ===========================================
+# 模板变量说明
+# ===========================================
+# {name}              - 原始文件名（不含扩展名）
+# {ext}               - 原始扩展名（含点号，如 .png）
+# {original_name}     - 原始完整文件名
+# {date}              - 当前日期 (YYYYMMDD)
+# {time}              - 当前时间 (HHMMSS)
+# {datetime:格式}      - 自定义日期格式，如 {datetime:%Y-%m-%d_%H%M%S}
+# {dominant_color}    - 图片主色调中文名（仅图片文件有效）
+#
+# 条件类型说明:
+#   filename_pattern  - glob 通配符匹配（如 "截图*"）
+#   filename_regex    - 正则表达式匹配
+#   extension         - 文件扩展名列表匹配
+#   is_image          - 判断是否为图片文件
