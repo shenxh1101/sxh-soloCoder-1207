@@ -17,7 +17,7 @@ class RollbackManager:
 
     def rollback_by_ids(self, operation_ids: List[str], dry_run: bool = False) -> List[dict]:
         all_records = self._op_logger.get_records()
-        records = [r for r in all_records if r["operation_id"] in operation_ids and r.get("success")]
+        records = [r for r in all_records if r["operation_id"] in operation_ids and r.get("success") and not r.get("rolled_back")]
         return self._do_rollback(records, dry_run)
 
     def _do_rollback(self, records: list, dry_run: bool) -> List[dict]:
@@ -29,12 +29,18 @@ class RollbackManager:
         logger.info(f"回滚 {len(reversed_records)} 条记录 (从最新到最旧)")
 
         results = []
+        rolled_back_ids = []
         for record in reversed_records:
             result = self._rollback_one(record, dry_run)
             results.append(result)
+            if result.get("success") and not result.get("dry_run"):
+                rolled_back_ids.append(record["operation_id"])
             if not result.get("success") and not result.get("dry_run"):
                 logger.warning(f"回滚中断: {result.get('error')}")
                 break
+
+        if rolled_back_ids and not dry_run:
+            self._op_logger.mark_rolled_back(rolled_back_ids)
 
         return results
 
@@ -74,7 +80,6 @@ class RollbackManager:
                         result["success"] = True
                         result["note"] = "文件已经是原名，跳过"
                         logger.info(f"文件已恢复原名，跳过: {c_basename}")
-                        self._op_logger.remove_records([operation_id])
                         return result
                     if os.path.basename(new_path) in c_basename:
                         new_path = c
@@ -96,7 +101,6 @@ class RollbackManager:
             os.rename(new_path, original_path)
             logger.info(f"回滚成功: {os.path.basename(new_path)} -> {os.path.basename(original_path)}")
             result["success"] = True
-            self._op_logger.remove_records([operation_id])
         except OSError as e:
             error = f"回滚失败: {e}"
             logger.error(error)
@@ -105,7 +109,11 @@ class RollbackManager:
         return result
 
     def show_history(self, count: Optional[int] = 10):
-        records = self._op_logger.get_successful_renames(count)
+        records = self._op_logger.query_records(
+            success_only=True,
+            include_rolled_back=True,
+            limit=count,
+        )
         if not records:
             print("没有最近的更名操作记录")
             return
@@ -113,8 +121,11 @@ class RollbackManager:
         print(f"\n最近 {len(records)} 条重命名记录:")
         print("-" * 80)
         for r in records:
-            print(f"  [{r['timestamp']}] {r['operation_id']}")
+            status = "✓ 已回滚" if r.get("rolled_back") else "✓"
+            print(f"  [{r['timestamp']}] [{status}] {r['operation_id']}")
             print(f"    原始: {os.path.basename(r['original_path'])}")
             print(f"    重命名: {os.path.basename(r['new_path'])}")
             print(f"    规则: {r['rule']}")
+            if r.get("rolled_back_at"):
+                print(f"    回滚于: {r['rolled_back_at']}")
             print()

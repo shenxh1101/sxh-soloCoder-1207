@@ -4,7 +4,7 @@ import fnmatch
 import logging
 import datetime
 import time
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 from .config import Rule, Condition
 
@@ -38,6 +38,29 @@ def _parse_time_offset(offset_str: str) -> float:
         unit = match.group(2)
         total += value * _TIME_UNITS.get(unit, 0)
     return total
+
+
+def _extract_captures(rule: Rule, filepath: str) -> Dict[str, str]:
+    captures = {}
+    filename = os.path.basename(filepath)
+    dirname = os.path.dirname(filepath)
+    dirname_basename = os.path.basename(dirname)
+
+    captures["source_dir"] = dirname_basename
+    captures["source_path"] = dirname
+
+    for cond in rule.conditions:
+        if cond.type == "filename_regex" and cond.pattern:
+            try:
+                m = re.search(cond.pattern, filename)
+                if m:
+                    for i, g in enumerate(m.groups(), 1):
+                        captures[str(i)] = g or ""
+                    captures.update({k: v or "" for k, v in m.groupdict().items()})
+            except re.error:
+                pass
+
+    return captures
 
 
 def _get_dominant_color_name(image_path: str) -> str:
@@ -138,6 +161,12 @@ def _check_condition(condition: Condition, filepath: str, filename: str, ext: st
         except OSError:
             return False
 
+    elif condition.type == "source_dir":
+        if condition.source_dir:
+            dirname = os.path.dirname(filepath)
+            return fnmatch.fnmatch(os.path.basename(dirname), condition.source_dir)
+        return False
+
     return False
 
 
@@ -164,25 +193,41 @@ def preview_file(filepath: str, rules: List[Rule]) -> Optional[dict]:
         return None
 
     rule = find_matching_rule(filepath, rules)
+    stat = os.stat(filepath)
+
     if rule is None:
-        return None
+        return {
+            "filepath": filepath,
+            "filename": os.path.basename(filepath),
+            "size": stat.st_size,
+            "created": datetime.datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M:%S"),
+            "matched": False,
+            "rule_name": None,
+            "rule_priority": None,
+            "new_name": None,
+            "new_path": None,
+            "will_change": False,
+            "captures": {},
+        }
 
     new_path = generate_new_name(filepath, rule)
-    stat = os.stat(filepath)
+    captures = _extract_captures(rule, filepath)
     return {
         "filepath": filepath,
         "filename": os.path.basename(filepath),
         "size": stat.st_size,
         "created": datetime.datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M:%S"),
+        "matched": True,
         "rule_name": rule.name,
         "rule_priority": rule.priority,
         "new_name": os.path.basename(new_path),
         "new_path": new_path,
         "will_change": os.path.normpath(new_path) != os.path.normpath(filepath),
+        "captures": captures,
     }
 
 
-def _resolve_templates(pattern: str, filepath: str) -> str:
+def _resolve_templates(pattern: str, filepath: str, rule: Optional[Rule] = None) -> str:
     filename = os.path.basename(filepath)
     name, ext = os.path.splitext(filename)
     now = datetime.datetime.now()
@@ -207,11 +252,22 @@ def _resolve_templates(pattern: str, filepath: str) -> str:
             color_name = "未知色"
         result = result.replace("{dominant_color}", color_name)
 
+    if rule:
+        captures = _extract_captures(rule, filepath)
+        capture_pattern = re.compile(r"\{capture:([^}]+)\}")
+        for match in capture_pattern.finditer(result):
+            key = match.group(1)
+            val = captures.get(key, "")
+            result = result.replace(match.group(0), val)
+
+        result = result.replace("{source_dir}", captures.get("source_dir", ""))
+        result = result.replace("{source_path}", captures.get("source_path", ""))
+
     return result
 
 
 def generate_new_name(filepath: str, rule: Rule) -> str:
-    new_filename = _resolve_templates(rule.rename_pattern, filepath)
+    new_filename = _resolve_templates(rule.rename_pattern, filepath, rule)
     dirname = os.path.dirname(filepath)
     new_path = os.path.join(dirname, new_filename)
 

@@ -15,6 +15,7 @@ class Condition:
     max_size_str: Optional[str] = None
     created_after: Optional[str] = None
     created_before: Optional[str] = None
+    source_dir: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Condition":
@@ -41,6 +42,7 @@ class Condition:
             max_size_str=max_size_str,
             created_after=data.get("created_after"),
             created_before=data.get("created_before"),
+            source_dir=data.get("source_dir"),
         )
 
     @staticmethod

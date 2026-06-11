@@ -18,7 +18,6 @@ poll_interval: 1.0
 debounce_seconds: 2.0
 
 # 文件大小稳定性检查次数 - 连续N次检测到大小不变才认为写入完成
-# 对于大文件下载，建议设为 5~10
 stability_checks: 3
 
 # 日志与历史按天轮转 (每天生成独立文件)
@@ -34,7 +33,6 @@ ignored_patterns:
 
 # ===========================================
 # 重命名规则（按 priority 从小到大匹配，越小越优先）
-#   - 文件只匹配第一个满足所有条件的规则
 # ===========================================
 rules:
   # ---- 规则1: 截图文件按时间重命名 ----
@@ -69,49 +67,70 @@ rules:
         max_size: "5MB"
     rename_pattern: "{name}_{dominant_color}{ext}"
 
-  # ---- 规则4: 最近1小时内的新图片加时间戳 ----
-  - name: "近期新图片加时间戳"
-    priority: 12
+  # ---- 规则4: 用正则捕获发票号分组重命名 ----
+  - name: "发票文件按编号重命名"
+    priority: 5
+    enabled: false
+    conditions:
+      - type: "filename_regex"
+        pattern: "^(.+)_(\\d{8})_发票(\\d+)\\.(pdf|jpg|png)$"
+      - type: "source_dir"
+        source_dir: "下载*"
+    rename_pattern: "发票_{capture:2}_{capture:3}_{datetime:%H%M%S}{ext}"
+
+  # ---- 规则5: 从截图目录来的图片加来源标记 ----
+  - name: "截图目录图片加来源标记"
+    priority: 8
     enabled: false
     conditions:
       - type: "is_image"
-      - type: "created_after"
-        created_after: "1h"
-    rename_pattern: "{datetime:%Y%m%d_%H%M%S}_{name}{ext}"
+      - type: "source_dir"
+        source_dir: "*截图*"
+    rename_pattern: "来自{source_dir}_{name}{ext}"
 
-  # ---- 规则5: 下载文件按日期整理 ----
-  - name: "下载文件添加日期前缀"
-    priority: 20
+  # ---- 规则6: 下载目录大文件加日期+来源 ----
+  - name: "下载目录大文件加日期"
+    priority: 15
     enabled: false
     conditions:
-      - type: "filename_pattern"
-        pattern: "download*"
-    rename_pattern: "{date}_{original_name}"
+      - type: "file_size"
+        min_size: "10MB"
+      - type: "source_dir"
+        source_dir: "下载*"
+    rename_pattern: "{date}_{source_dir}_{original_name}"
 
 # ===========================================
 # 模板变量说明
 # ===========================================
-# {name}              - 原始文件名（不含扩展名）
-# {ext}               - 原始扩展名（含点号，如 .png）
-# {original_name}     - 原始完整文件名
-# {date}              - 当前日期 (YYYYMMDD)
-# {time}              - 当前时间 (HHMMSS)
-# {datetime:格式}      - 自定义日期格式，如 {datetime:%Y-%m-%d_%H%M%S}
-# {dominant_color}    - 图片主色调中文名（仅图片文件有效）
+# 基础变量:
+#   {name}              - 原始文件名（不含扩展名）
+#   {ext}               - 原始扩展名（含点号，如 .png）
+#   {original_name}     - 原始完整文件名
+#   {date}              - 当前日期 (YYYYMMDD)
+#   {time}              - 当前时间 (HHMMSS)
+#   {datetime:格式}      - 自定义日期格式，如 {datetime:%Y-%m-%d_%H%M%S}
+#   {dominant_color}    - 图片主色调中文名（仅图片文件有效）
+#
+# 分组/捕获变量:
+#   {source_dir}        - 文件所在目录名
+#   {source_path}       - 文件所在完整目录路径
+#   {capture:N}         - filename_regex 正则捕获组 N (从1开始)
+#   {capture:name}      - 命名捕获组 (?P<name>...)
 #
 # 条件类型说明:
 #   filename_pattern  - glob 通配符匹配（如 "截图*"）
-#   filename_regex    - 正则表达式匹配
+#   filename_regex    - 正则表达式匹配 (同时产生捕获组)
 #   extension         - 文件扩展名列表匹配
 #   is_image          - 判断是否为图片文件
-#   file_size         - 文件大小范围 min_size / max_size (支持 "128KB", "5MB" 等)
+#   file_size         - 文件大小范围 min_size / max_size (支持 "128KB", "5MB")
 #   created_after     - 创建时间晚于 (如 "1h", "30m", "2d")
 #   created_before    - 创建时间早于 (格式同上)
+#   source_dir        - 来源目录名匹配 (glob, 如 "下载*" 或 "*截图*")
 #
 # 命令说明:
-#   daemon   - 守护模式，持续监控
-#   scan     - 单次扫描处理
-#   preview  - 预览规则匹配结果（不实际重命名）
-#   rollback - 回滚操作（支持 -n 数量 / --dry-run 预览 / --history 查看）
-#   query    - 查询历史（支持 -d 日期 / -r 规则 / -k 关键字）
-#   status   - 查看状态
+#   daemon       - 守护模式，持续监控
+#   scan         - 单次扫描处理
+#   preview      - 预览匹配结果 (--changed 只看会改名的)
+#   rollback     - 回滚操作 (支持 -n 数量 / --dry-run 预览 / --history 查看)
+#   query        - 查询历史 (-d 起 -D 止 / -r 规则 / -k 关键字 / --no-rolled-back)
+#   status       - 查看状态 (含已回滚统计)

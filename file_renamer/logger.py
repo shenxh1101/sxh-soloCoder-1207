@@ -4,6 +4,7 @@ import json
 import os
 import time
 import fnmatch
+import glob
 from typing import Optional, List, Dict, Any
 
 
@@ -48,6 +49,14 @@ def _get_daily_history_path(base_path: str, date_str: Optional[str] = None) -> s
     return os.path.join(dirname, daily_name)
 
 
+def _get_all_daily_files(base_path: str) -> List[str]:
+    dirname = os.path.dirname(base_path)
+    basename = os.path.basename(base_path)
+    name, ext = os.path.splitext(basename)
+    pattern = os.path.join(dirname, f"{name}_????????{ext}")
+    return sorted(glob.glob(pattern))
+
+
 class OperationLogger:
     def __init__(self, history_file: str, daily_rotate: bool = False):
         self._history_file = history_file
@@ -81,6 +90,28 @@ class OperationLogger:
         with open(target, "w", encoding="utf-8") as f:
             json.dump(records, f, ensure_ascii=False, indent=2)
 
+    def _find_record_file(self, operation_id: str) -> Optional[str]:
+        if self._daily_rotate:
+            for filepath in _get_all_daily_files(self._history_file):
+                records = self._read_records_file(filepath)
+                for r in records:
+                    if r.get("operation_id") == operation_id:
+                        return filepath
+        else:
+            records = self._read_records()
+            for r in records:
+                if r.get("operation_id") == operation_id:
+                    return self._active_file()
+        return None
+
+    def _update_record_in_file(self, filepath: str, operation_id: str, updates: dict):
+        records = self._read_records_file(filepath)
+        for r in records:
+            if r.get("operation_id") == operation_id:
+                r.update(updates)
+                break
+        self._write_records(records, filepath)
+
     def record_rename(
         self,
         original_path: str,
@@ -99,6 +130,8 @@ class OperationLogger:
             "rule": rule_name,
             "success": success,
             "error": error,
+            "rolled_back": False,
+            "rolled_back_at": None,
         }
 
         records = self._read_records()
@@ -115,10 +148,19 @@ class OperationLogger:
 
     def get_successful_renames(self, count: Optional[int] = None) -> list:
         records = self._read_records()
-        successful = [r for r in records if r.get("success")]
+        successful = [r for r in records if r.get("success") and not r.get("rolled_back")]
         if count is not None:
             return successful[-count:]
         return successful
+
+    def mark_rolled_back(self, operation_ids: list):
+        for op_id in operation_ids:
+            filepath = self._find_record_file(op_id)
+            if filepath:
+                self._update_record_in_file(filepath, op_id, {
+                    "rolled_back": True,
+                    "rolled_back_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                })
 
     def remove_records(self, operation_ids: list):
         records = self._read_records()
@@ -130,58 +172,84 @@ class OperationLogger:
 
     def query_records(
         self,
-        date_str: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
         rule: Optional[str] = None,
         keyword: Optional[str] = None,
         success_only: bool = True,
+        include_rolled_back: bool = True,
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
-        if date_str and self._daily_rotate:
-            filepath = _get_daily_history_path(self._history_file, date_str)
-            records = self._read_records_file(filepath)
-        elif date_str and not self._daily_rotate:
-            records = self._read_records()
-            if date_str:
-                records = [r for r in records if r.get("date", "") == date_str]
-        else:
-            records = self._read_records()
+        records = self._collect_all_records(date_from, date_to)
 
         if success_only:
             records = [r for r in records if r.get("success")]
+
+        if not include_rolled_back:
+            records = [r for r in records if not r.get("rolled_back")]
 
         if rule:
             records = [r for r in records if r.get("rule", "").find(rule) >= 0]
 
         if keyword:
+            keyword_lower = keyword.lower()
             records = [
                 r for r in records
-                if keyword.lower() in os.path.basename(r.get("original_path", "")).lower()
-                or keyword.lower() in os.path.basename(r.get("new_path", "")).lower()
-                or fnmatch.fnmatch(os.path.basename(r.get("original_path", "")).lower(), f"*{keyword.lower()}*")
+                if keyword_lower in os.path.basename(r.get("original_path", "")).lower()
+                or keyword_lower in os.path.basename(r.get("new_path", "")).lower()
+                or fnmatch.fnmatch(os.path.basename(r.get("original_path", "")).lower(), f"*{keyword_lower}*")
             ]
 
+        records.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+
         if limit and len(records) > limit:
-            records = records[-limit:]
+            records = records[:limit]
 
         return records
 
+    def _collect_all_records(self, date_from: Optional[str] = None, date_to: Optional[str] = None) -> list:
+        if self._daily_rotate:
+            all_files = _get_all_daily_files(self._history_file)
+
+            if date_from or date_to:
+                filtered = []
+                for fp in all_files:
+                    fname = os.path.basename(fp)
+                    name, ext = os.path.splitext(fname)
+                    date_part = name.split("_")[-1]
+                    if len(date_part) == 8 and date_part.isdigit():
+                        if date_from and date_part < date_from:
+                            continue
+                        if date_to and date_part > date_to:
+                            continue
+                        filtered.append(fp)
+                all_files = filtered
+
+            records = []
+            for fp in all_files:
+                records.extend(self._read_records_file(fp))
+            return records
+        else:
+            records = self._read_records()
+            if date_from or date_to:
+                records = [
+                    r for r in records
+                    if (not date_from or r.get("date", "") >= date_from)
+                    and (not date_to or r.get("date", "") <= date_to)
+                ]
+            return records
+
     def get_available_dates(self) -> List[str]:
-        if not self._daily_rotate:
-            return []
-
-        dirname = os.path.dirname(self._history_file)
-        basename = os.path.basename(self._history_file)
-        name, ext = os.path.splitext(basename)
-        prefix = f"{name}_"
-
-        dates = []
-        if not os.path.isdir(dirname):
-            return []
-
-        for f in os.listdir(dirname):
-            if f.startswith(prefix) and f.endswith(ext):
-                date_part = f[len(prefix):-len(ext)]
+        if self._daily_rotate:
+            dates = []
+            for fp in _get_all_daily_files(self._history_file):
+                fname = os.path.basename(fp)
+                name, ext = os.path.splitext(fname)
+                date_part = name.split("_")[-1]
                 if len(date_part) == 8 and date_part.isdigit():
                     dates.append(date_part)
+            return sorted(dates)
 
+        records = self._read_records()
+        dates = list(set(r.get("date", "") for r in records if r.get("date")))
         return sorted(dates)
