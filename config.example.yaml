@@ -70,7 +70,7 @@ watch_dirs:
         conditions:
           - type: "is_image"
           - type: "source_dir"
-            source_dir: "*下载*"
+            source_dir: "*download*"
         rename_pattern: "{source_dir}_{name}_{dominant_color}{ext}"
 
       - name: "下载大文件加日期"
@@ -79,7 +79,7 @@ watch_dirs:
           - type: "file_size"
             min_size: "1MB"
           - type: "source_dir"
-            source_dir: "*下载*"
+            source_dir: "*download*"
         rename_pattern: "{date}_{original_name}"
 
       - name: "发票文件按编号重命名"
@@ -89,7 +89,7 @@ watch_dirs:
           - type: "filename_regex"
             pattern: "^(.+)_(\\d{8})_发票(\\d+)\\.(pdf|jpg|png)$"
           - type: "source_dir"
-            source_dir: "*下载*"
+            source_dir: "*download*"
         rename_pattern: "发票_{capture:2}_{capture:3}_{datetime:%H%M%S}{ext}"
 
 # ===========================================

@@ -40,9 +40,13 @@ class FolderWatcher:
     def _scan_directory(self) -> set:
         current_files = set()
         try:
-            for entry in os.scandir(self._watch_dir):
-                if entry.is_file(follow_symlinks=False) and not self._is_ignored(entry.name):
-                    current_files.add(entry.path)
+            for dirpath, _, filenames in os.walk(self._watch_dir):
+                for fname in filenames:
+                    if self._is_ignored(fname):
+                        continue
+                    full_path = os.path.join(dirpath, fname)
+                    if os.path.isfile(full_path):
+                        current_files.add(full_path)
         except FileNotFoundError:
             logger.error(f"监控目录不可访问: {self._watch_dir}")
         except PermissionError:
@@ -55,7 +59,7 @@ class FolderWatcher:
         self._known_files[abs_path] = os.path.getmtime(abs_path)
 
     def start(self):
-        logger.info(f"开始监控目录: {self._watch_dir}")
+        logger.info(f"开始监控目录(含子目录): {self._watch_dir}")
         logger.info(f"轮询间隔: {self._poll_interval}s, 防抖: {self._debounce_seconds}s, 稳定性检查: {self._stability_checks}次")
 
         self._known_files = {}
@@ -100,7 +104,8 @@ class FolderWatcher:
             "last_size": -1,
             "stable_count": 0,
         }
-        logger.debug(f"检测到新文件(等待稳定): {os.path.basename(filepath)}")
+        rel_path = os.path.relpath(filepath, self._watch_dir)
+        logger.debug(f"检测到新文件(等待稳定): {rel_path}")
 
     def _process_pending(self, current_time: float):
         ready = []
@@ -125,7 +130,8 @@ class FolderWatcher:
             else:
                 info["last_size"] = current_size
                 info["stable_count"] = 0
-                logger.debug(f"文件大小变化 {os.path.basename(filepath)}: {current_size} bytes, 重置稳定性计数")
+                rel_path = os.path.relpath(filepath, self._watch_dir)
+                logger.debug(f"文件大小变化 {rel_path}: {current_size} bytes, 重置稳定性计数")
 
             if info["stable_count"] >= self._stability_checks:
                 ready.append(filepath)
@@ -134,12 +140,14 @@ class FolderWatcher:
         for filepath in ready:
             abs_path = os.path.abspath(filepath)
             if abs_path in self._processed_paths:
-                logger.debug(f"跳过已处理的文件: {os.path.basename(filepath)}")
+                rel_path = os.path.relpath(filepath, self._watch_dir)
+                logger.debug(f"跳过已处理的文件: {rel_path}")
                 self._known_files[abs_path] = os.path.getmtime(abs_path)
                 continue
 
             self._known_files[abs_path] = os.path.getmtime(abs_path)
-            logger.info(f"新文件已稳定: {os.path.basename(filepath)}")
+            rel_path = os.path.relpath(filepath, self._watch_dir)
+            logger.info(f"新文件已稳定: {rel_path}")
             try:
                 result = self._callback(filepath)
                 if result:

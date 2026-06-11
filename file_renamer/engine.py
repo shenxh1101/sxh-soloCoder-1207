@@ -338,7 +338,7 @@ def execute_rename(filepath: str, rule: Rule) -> Tuple[str, bool, Optional[str]]
         return filepath, False, str(e)
 
 
-def process_file(filepath: str, rules: List[Rule]) -> Optional[Tuple[str, str, Rule]]:
+def process_file(filepath: str, rules: List[Rule]) -> Optional[dict]:
     if not os.path.isfile(filepath):
         return None
 
@@ -347,6 +347,10 @@ def process_file(filepath: str, rules: List[Rule]) -> Optional[Tuple[str, str, R
         return None
 
     new_path, success, error = execute_rename(filepath, rule)
-    if success:
-        return (filepath, new_path, rule)
-    return None
+    return {
+        "original_path": filepath,
+        "new_path": new_path,
+        "rule": rule,
+        "success": success,
+        "error": error,
+    }

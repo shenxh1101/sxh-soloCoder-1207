@@ -34,7 +34,7 @@ def cmd_daemon(args):
     logger.info(f"监控目录数: {len(config.watch_dirs)}")
     for wd in config.watch_dirs:
         rules = wd.get_rules(config.global_rules)
-        logger.info(f"  [{wd.label}] {wd.path} ({len(rules)} 条规则)")
+        logger.info(f"  [{wd.label}] {wd.path} ({len(rules)} 条规则, 含子目录)")
 
     watchers = []
     for wd in config.watch_dirs:
@@ -45,12 +45,21 @@ def cmd_daemon(args):
         def make_handler(wd_label, wd_rules):
             def handle_new_file(filepath: str):
                 result = process_file(filepath, wd_rules)
-                if result:
-                    original_path, new_path, rule = result
-                    op_logger.record_rename(original_path, new_path, rule.name, True, watch_label=wd_label)
-                    return new_path
-                else:
+                if result is None:
                     logger.debug(f"[{wd_label}] 跳过文件 (无匹配规则): {os.path.basename(filepath)}")
+                    return None
+                if result["success"]:
+                    op_logger.record_rename(
+                        result["original_path"], result["new_path"],
+                        result["rule"].name, True, watch_label=wd_label,
+                    )
+                    return result["new_path"]
+                else:
+                    op_logger.record_rename(
+                        result["original_path"], result["new_path"],
+                        result["rule"].name, False, error=result["error"],
+                        watch_label=wd_label,
+                    )
                     return None
             return handle_new_file
 
@@ -90,6 +99,7 @@ def cmd_scan(args):
     logger.info(f"扫描目录数: {len(config.watch_dirs)}")
 
     total_processed = 0
+    total_failed = 0
     for wd in config.watch_dirs:
         rules = wd.get_rules(config.global_rules)
         ignored = wd.get_ignored_patterns(config.ignored_patterns)
@@ -102,12 +112,23 @@ def cmd_scan(args):
         files = scan_files_recursive(wd.path, ignored)
         for filepath in files:
             result = process_file(filepath, rules)
-            if result:
-                original_path, new_path, rule = result
-                op_logger.record_rename(original_path, new_path, rule.name, True, watch_label=wd.label)
+            if result is None:
+                continue
+            if result["success"]:
+                op_logger.record_rename(
+                    result["original_path"], result["new_path"],
+                    result["rule"].name, True, watch_label=wd.label,
+                )
                 total_processed += 1
+            else:
+                op_logger.record_rename(
+                    result["original_path"], result["new_path"],
+                    result["rule"].name, False, error=result["error"],
+                    watch_label=wd.label,
+                )
+                total_failed += 1
 
-    logger.info(f"扫描完成，共处理 {total_processed} 个文件")
+    logger.info(f"扫描完成，成功: {total_processed}, 失败: {total_failed}")
 
 
 def cmd_preview(args):
@@ -238,6 +259,9 @@ def cmd_query(args):
         keyword=args.keyword,
         success_only=not args.include_failed,
         include_rolled_back=not args.exclude_rolled_back,
+        watch_label=args.source,
+        only_failed=args.only_failed,
+        only_rolled_back=args.only_rolled_back,
         limit=args.limit,
     )
 
@@ -253,7 +277,7 @@ def cmd_query(args):
         elif r.get("success"):
             status = "✓"
         else:
-            status = "✗"
+            status = "✗ 失败"
 
         print(f"  [{r['timestamp']}] [{status}] {r['operation_id']}")
         print(f"    原始: {os.path.basename(r['original_path'])}")
@@ -323,8 +347,12 @@ def cmd_export(args):
     records = op_logger.query_records(
         date_from=args.date_from,
         date_to=args.date_to,
+        rule=args.rule,
         success_only=not args.include_failed,
         include_rolled_back=True,
+        watch_label=args.source,
+        only_failed=args.only_failed,
+        only_rolled_back=args.only_rolled_back,
         limit=0,
     )
 
@@ -381,7 +409,14 @@ def cmd_export(args):
     date_info = ""
     if args.date_from or args.date_to:
         date_info = f" ({args.date_from or '最早'} ~ {args.date_to or '最晚'})"
-    print(f"导出完成: {len(records)} 条记录{date_info} -> {output_path}")
+    filter_info = ""
+    filters = []
+    if args.source: filters.append(f"来源={args.source}")
+    if args.rule: filters.append(f"规则={args.rule}")
+    if args.only_failed: filters.append("仅失败")
+    if args.only_rolled_back: filters.append("仅回滚")
+    if filters: filter_info = f" [筛选: {', '.join(filters)}]"
+    print(f"导出完成: {len(records)} 条记录{date_info}{filter_info} -> {output_path}")
 
 
 def cmd_status(args):
@@ -393,27 +428,40 @@ def cmd_status(args):
     successful = [r for r in records if r.get("success")]
     failed = [r for r in records if not r.get("success")]
     rolled_back = [r for r in records if r.get("rolled_back")]
-
-    print(f"\n=== 文件更名器状态 ===")
-    print(f"监控目录数: {len(config.watch_dirs)}")
-    for wd in config.watch_dirs:
-        rules = wd.get_rules(config.global_rules)
-        print(f"  [{wd.label}] {wd.path} ({len(rules)} 条规则)")
-    print(f"配置: 日志轮转={'是' if config.log_daily_rotate else '否'}, 稳定性检查={config.stability_checks}次")
-    print(f"总操作数: {len(records)}")
-    print(f"成功: {len(successful)}, 失败: {len(failed)}, 已回滚: {len(rolled_back)}")
-
     active = [r for r in successful if not r.get("rolled_back")]
+
+    print(f"\n{'=' * 70}")
+    print(f"  文件更名器 - 服务状态")
+    print(f"{'=' * 70}")
+    print(f"  配置: 日志轮转={'是' if config.log_daily_rotate else '否'}, 稳定性检查={config.stability_checks}次")
+    print(f"  全局: 总计 {len(records)} | 成功 {len(successful)} | 失败 {len(failed)} | 已回滚 {len(rolled_back)} | 活跃 {len(active)}")
+
+    summary = op_logger.get_source_summary()
+    if summary:
+        print(f"\n  {'─' * 70}")
+        print(f"  {'来源目录':<18} {'总计':>6} {'成功':>6} {'失败':>6} {'回滚':>6}  {'最近处理时间':<20}")
+        print(f"  {'─' * 70}")
+        for s in summary:
+            label = s["label"] if len(s["label"]) <= 16 else s["label"][:15] + "…"
+            last = s["last_time"] if s["last_time"] else "从未"
+            print(f"  {label:<18} {s['total']:>6} {s['success']:>6} {s['failed']:>6} {s['rolled_back']:>6}  {last:<20}")
+
+        for wd in config.watch_dirs:
+            has_records = any(s["label"] == wd.label for s in summary)
+            if not has_records:
+                print(f"  {wd.label:<18} {'0':>6} {'0':>6} {'0':>6} {'0':>6}  {'无记录':<20}")
+
     if active:
-        print(f"\n最近 5 条活跃操作 (未回滚):")
+        print(f"\n  最近 5 条活跃操作:")
         for r in active[-5:]:
             label = f" [{r.get('watch_label', '')}]" if r.get("watch_label") else ""
-            print(f"  [{r['timestamp']}]{label} {os.path.basename(r['new_path'])} (规则: {r['rule']})")
+            print(f"    [{r['timestamp']}]{label} {os.path.basename(r['new_path'])} (规则: {r['rule']})")
 
     if config.log_daily_rotate:
         dates = op_logger.get_available_dates()
         if dates:
-            print(f"\n历史记录日期: {dates[0]} ~ {dates[-1]}")
+            print(f"\n  历史日期: {dates[0]} ~ {dates[-1]}")
+    print(f"{'=' * 70}\n")
 
 
 def main():
@@ -422,18 +470,16 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:
-  python run.py daemon -c config.yaml                # 启动守护进程 (多目录并行)
+  python run.py daemon -c config.yaml                # 启动守护进程 (含子目录)
   python run.py scan -c config.yaml                   # 单次扫描全部目录
   python run.py preview -c config.yaml                # 预览全部目录
   python run.py preview -c config.yaml --changed      # 只看将改名的文件
-  python run.py rollback -c config.yaml -n 5          # 回滚最近5次操作 (跨天)
-  python run.py rollback -c config.yaml --dry-run -n 3 # 预览回滚
+  python run.py rollback -c config.yaml -n 5          # 回滚最近5次操作
   python run.py query -c config.yaml -k 截图           # 按文件名关键字查询
-  python run.py query -c config.yaml -d 20260601 -D 20260612 -r 截图  # 日期范围
-  python run.py stats -c config.yaml -g rule          # 按规则统计
-  python run.py stats -c config.yaml -g source -d 20260601 -D 20260612  # 按来源统计
-  python run.py export -c config.yaml --format csv -d 20260601 -D 20260612  # 导出CSV
-  python run.py status -c config.yaml                 # 查看状态
+  python run.py query -c config.yaml --only-failed    # 只看失败记录
+  python run.py stats -c config.yaml -g source        # 按来源统计
+  python run.py export -c config.yaml -s 截图目录 --only-failed  # 导出失败记录
+  python run.py status -c config.yaml                 # 查看服务状态
         """,
     )
 
@@ -442,7 +488,7 @@ def main():
 
     subparsers = parser.add_subparsers(dest="command", help="可用命令")
 
-    daemon_parser = subparsers.add_parser("daemon", help="启动守护进程，持续监控文件夹")
+    daemon_parser = subparsers.add_parser("daemon", help="启动守护进程，持续监控文件夹(含子目录)")
 
     scan_parser = subparsers.add_parser("scan", help="单次扫描目录并处理已有文件")
 
@@ -460,7 +506,10 @@ def main():
     query_parser.add_argument("--date-to", "-D", help="结束日期 (YYYYMMDD)")
     query_parser.add_argument("--rule", "-r", help="按规则名筛选")
     query_parser.add_argument("--keyword", "-k", help="文件名关键字搜索")
+    query_parser.add_argument("--source", "-s", help="按来源目录筛选")
     query_parser.add_argument("--include-failed", action="store_true", help="包含失败记录")
+    query_parser.add_argument("--only-failed", action="store_true", help="仅显示失败记录")
+    query_parser.add_argument("--only-rolled-back", action="store_true", help="仅显示已回滚记录")
     query_parser.add_argument("--exclude-rolled-back", "--no-rolled-back", action="store_true", help="排除已回滚记录")
     query_parser.add_argument("--limit", "-n", type=int, default=50, help="最多返回条数 (默认: 50)")
 
@@ -474,9 +523,13 @@ def main():
     export_parser.add_argument("--date-to", "-D", help="结束日期 (YYYYMMDD)")
     export_parser.add_argument("--format", "-f", choices=["csv", "json"], default="csv", help="导出格式 (默认: csv)")
     export_parser.add_argument("--output", "-o", help="输出文件路径")
+    export_parser.add_argument("--source", "-s", help="按来源目录筛选")
+    export_parser.add_argument("--rule", "-r", help="按规则名筛选")
     export_parser.add_argument("--include-failed", action="store_true", help="包含失败记录")
+    export_parser.add_argument("--only-failed", action="store_true", help="仅导出失败记录")
+    export_parser.add_argument("--only-rolled-back", action="store_true", help="仅导出已回滚记录")
 
-    status_parser = subparsers.add_parser("status", help="查看当前状态和操作记录")
+    status_parser = subparsers.add_parser("status", help="查看服务状态 (含每目录统计)")
 
     args = parser.parse_args()
 

@@ -190,18 +190,28 @@ class OperationLogger:
         keyword: Optional[str] = None,
         success_only: bool = True,
         include_rolled_back: bool = True,
+        watch_label: Optional[str] = None,
+        only_failed: bool = False,
+        only_rolled_back: bool = False,
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
         records = self._collect_all_records(date_from, date_to)
 
-        if success_only:
+        if only_failed:
+            records = [r for r in records if not r.get("success")]
+        elif success_only:
             records = [r for r in records if r.get("success")]
 
-        if not include_rolled_back:
+        if only_rolled_back:
+            records = [r for r in records if r.get("rolled_back")]
+        elif not include_rolled_back:
             records = [r for r in records if not r.get("rolled_back")]
 
         if rule:
             records = [r for r in records if r.get("rule", "").find(rule) >= 0]
+
+        if watch_label:
+            records = [r for r in records if r.get("watch_label", "").find(watch_label) >= 0]
 
         if keyword:
             keyword_lower = keyword.lower()
@@ -218,6 +228,34 @@ class OperationLogger:
             records = records[:limit]
 
         return records
+
+    def get_source_summary(self) -> List[Dict[str, Any]]:
+        records = self._collect_all_records(None, None)
+
+        sources: Dict[str, dict] = {}
+        for r in records:
+            src = r.get("watch_label", "unknown")
+            if src not in sources:
+                sources[src] = {
+                    "label": src,
+                    "total": 0,
+                    "success": 0,
+                    "failed": 0,
+                    "rolled_back": 0,
+                    "last_time": "",
+                }
+            sources[src]["total"] += 1
+            ts = r.get("timestamp", "")
+            if ts > sources[src]["last_time"]:
+                sources[src]["last_time"] = ts
+            if r.get("success") and not r.get("rolled_back"):
+                sources[src]["success"] += 1
+            elif r.get("rolled_back"):
+                sources[src]["rolled_back"] += 1
+            else:
+                sources[src]["failed"] += 1
+
+        return sorted(sources.values(), key=lambda s: s["label"])
 
     def get_statistics(
         self,
