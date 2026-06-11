@@ -25,10 +25,16 @@ class RollbackManager:
             logger.info("没有可回滚的操作")
             return []
 
+        reversed_records = list(reversed(records))
+        logger.info(f"回滚 {len(reversed_records)} 条记录 (从最新到最旧)")
+
         results = []
-        for record in records:
+        for record in reversed_records:
             result = self._rollback_one(record, dry_run)
             results.append(result)
+            if not result.get("success") and not result.get("dry_run"):
+                logger.warning(f"回滚中断: {result.get('error')}")
+                break
 
         return results
 
@@ -52,12 +58,35 @@ class RollbackManager:
             return result
 
         if not os.path.exists(new_path):
-            error = f"重命名后的文件不存在: {new_path}"
-            logger.warning(error)
-            result["error"] = error
-            return result
+            filename_only = os.path.basename(new_path)
+            dirname = os.path.dirname(new_path)
+            if os.path.exists(os.path.join(dirname, filename_only)):
+                new_path = os.path.join(dirname, filename_only)
+            else:
+                candidates = [
+                    os.path.join(dirname, f) for f in os.listdir(dirname)
+                    if os.path.isfile(os.path.join(dirname, f))
+                ]
+                found = False
+                for c in candidates:
+                    c_basename = os.path.basename(c)
+                    if c_basename == os.path.basename(original_path):
+                        result["success"] = True
+                        result["note"] = "文件已经是原名，跳过"
+                        logger.info(f"文件已恢复原名，跳过: {c_basename}")
+                        self._op_logger.remove_records([operation_id])
+                        return result
+                    if os.path.basename(new_path) in c_basename:
+                        new_path = c
+                        found = True
+                        break
+                if not found:
+                    error = f"重命名后的文件不存在: {new_path}"
+                    logger.warning(error)
+                    result["error"] = error
+                    return result
 
-        if os.path.exists(original_path):
+        if os.path.exists(original_path) and os.path.normpath(original_path) != os.path.normpath(new_path):
             error = f"原文件名已存在，无法回滚: {original_path}"
             logger.warning(error)
             result["error"] = error

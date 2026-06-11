@@ -8,24 +8,33 @@ watch_dir: "./test_watch"
 # 操作日志文件路径
 log_file: "./rename_operations.log"
 
-# operation history file for rollback
+# 操作历史记录文件 (用于回滚)
 history_file: "./rename_history.json"
 
 # 轮询间隔（秒）
 poll_interval: 1.0
 
-# 防抖时间（秒）- 文件创建后稳定等待时间
+# 防抖时间（秒）- 文件创建后初始等待时间
 debounce_seconds: 2.0
+
+# 文件大小稳定性检查次数 - 连续N次检测到大小不变才认为写入完成
+# 对于大文件下载，建议设为 5~10
+stability_checks: 3
+
+# 日志与历史按天轮转 (每天生成独立文件)
+log_daily_rotate: false
 
 # 忽略的文件名模式（glob 通配符）
 ignored_patterns:
   - "*.tmp"
+  - "*.crdownload"
   - "~*"
   - ".DS_Store"
   - "Thumbs.db"
 
 # ===========================================
 # 重命名规则（按 priority 从小到大匹配，越小越优先）
+#   - 文件只匹配第一个满足所有条件的规则
 # ===========================================
 rules:
   # ---- 规则1: 截图文件按时间重命名 ----
@@ -39,7 +48,7 @@ rules:
         values: [".png", ".jpg", ".jpeg"]
     rename_pattern: "截图_{datetime:%Y%m%d_%H%M%S}{ext}"
 
-  # ---- 规则2: 拼写变体截图 ----
+  # ---- 规则2: QQ/微信截图 ----
   - name: "QQ/微信截图按时间重命名"
     priority: 2
     enabled: true
@@ -50,15 +59,27 @@ rules:
         values: [".png", ".jpg", ".jpeg"]
     rename_pattern: "截图_{datetime:%Y%m%d_%H%M%S}{ext}"
 
-  # ---- 规则3: 图片添加主色调 ----
-  - name: "图片添加主色调"
+  # ---- 规则3: 小图片添加主色调 ----
+  - name: "小图片添加主色调"
     priority: 10
     enabled: true
     conditions:
       - type: "is_image"
+      - type: "file_size"
+        max_size: "5MB"
     rename_pattern: "{name}_{dominant_color}{ext}"
 
-  # ---- 规则4: 下载文件按日期整理 ----
+  # ---- 规则4: 最近1小时内的新图片加时间戳 ----
+  - name: "近期新图片加时间戳"
+    priority: 12
+    enabled: false
+    conditions:
+      - type: "is_image"
+      - type: "created_after"
+        created_after: "1h"
+    rename_pattern: "{datetime:%Y%m%d_%H%M%S}_{name}{ext}"
+
+  # ---- 规则5: 下载文件按日期整理 ----
   - name: "下载文件添加日期前缀"
     priority: 20
     enabled: false
@@ -83,3 +104,14 @@ rules:
 #   filename_regex    - 正则表达式匹配
 #   extension         - 文件扩展名列表匹配
 #   is_image          - 判断是否为图片文件
+#   file_size         - 文件大小范围 min_size / max_size (支持 "128KB", "5MB" 等)
+#   created_after     - 创建时间晚于 (如 "1h", "30m", "2d")
+#   created_before    - 创建时间早于 (格式同上)
+#
+# 命令说明:
+#   daemon   - 守护模式，持续监控
+#   scan     - 单次扫描处理
+#   preview  - 预览规则匹配结果（不实际重命名）
+#   rollback - 回滚操作（支持 -n 数量 / --dry-run 预览 / --history 查看）
+#   query    - 查询历史（支持 -d 日期 / -r 规则 / -k 关键字）
+#   status   - 查看状态

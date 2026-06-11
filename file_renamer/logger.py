@@ -1,11 +1,13 @@
 import logging
+import logging.handlers
 import json
 import os
 import time
-from typing import Optional, Dict, Any
+import fnmatch
+from typing import Optional, List, Dict, Any
 
 
-def setup_logger(log_file: str, level: int = logging.INFO) -> logging.Logger:
+def setup_logger(log_file: str, level: int = logging.INFO, daily_rotate: bool = False) -> logging.Logger:
     logger = logging.getLogger("file_renamer")
     logger.setLevel(level)
 
@@ -22,34 +24,61 @@ def setup_logger(log_file: str, level: int = logging.INFO) -> logging.Logger:
         if log_dir and not os.path.exists(log_dir):
             os.makedirs(log_dir, exist_ok=True)
 
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        if daily_rotate:
+            file_handler = logging.handlers.TimedRotatingFileHandler(
+                log_file, when="midnight", interval=1, backupCount=30, encoding="utf-8"
+            )
+            file_handler.suffix = "%Y%m%d"
+        else:
+            file_handler = logging.FileHandler(log_file, encoding="utf-8")
+
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
     return logger
 
 
-class OperationLogger:
-    def __init__(self, history_file: str):
-        self._history_file = history_file
-        self._ensure_file()
+def _get_daily_history_path(base_path: str, date_str: Optional[str] = None) -> str:
+    if date_str is None:
+        date_str = time.strftime("%Y%m%d")
+    dirname = os.path.dirname(base_path)
+    basename = os.path.basename(base_path)
+    name, ext = os.path.splitext(basename)
+    daily_name = f"{name}_{date_str}{ext}"
+    return os.path.join(dirname, daily_name)
 
-    def _ensure_file(self):
-        if not os.path.exists(self._history_file):
-            history_dir = os.path.dirname(self._history_file)
+
+class OperationLogger:
+    def __init__(self, history_file: str, daily_rotate: bool = False):
+        self._history_file = history_file
+        self._daily_rotate = daily_rotate
+
+    def _active_file(self) -> str:
+        if self._daily_rotate:
+            return _get_daily_history_path(self._history_file)
+        return self._history_file
+
+    def _ensure_file(self, filepath: str):
+        if not os.path.exists(filepath):
+            history_dir = os.path.dirname(filepath)
             if history_dir and not os.path.exists(history_dir):
                 os.makedirs(history_dir, exist_ok=True)
-            self._write_records([])
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump([], f, ensure_ascii=False, indent=2)
 
-    def _read_records(self) -> list:
+    def _read_records_file(self, filepath: str) -> list:
         try:
-            with open(self._history_file, "r", encoding="utf-8") as f:
+            with open(filepath, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             return []
 
-    def _write_records(self, records: list):
-        with open(self._history_file, "w", encoding="utf-8") as f:
+    def _read_records(self) -> list:
+        return self._read_records_file(self._active_file())
+
+    def _write_records(self, records: list, filepath: Optional[str] = None):
+        target = filepath or self._active_file()
+        with open(target, "w", encoding="utf-8") as f:
             json.dump(records, f, ensure_ascii=False, indent=2)
 
     def record_rename(
@@ -64,6 +93,7 @@ class OperationLogger:
         record = {
             "operation_id": operation_id,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "date": time.strftime("%Y%m%d"),
             "original_path": os.path.abspath(original_path),
             "new_path": os.path.abspath(new_path),
             "rule": rule_name,
@@ -97,3 +127,61 @@ class OperationLogger:
 
     def clear(self):
         self._write_records([])
+
+    def query_records(
+        self,
+        date_str: Optional[str] = None,
+        rule: Optional[str] = None,
+        keyword: Optional[str] = None,
+        success_only: bool = True,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        if date_str and self._daily_rotate:
+            filepath = _get_daily_history_path(self._history_file, date_str)
+            records = self._read_records_file(filepath)
+        elif date_str and not self._daily_rotate:
+            records = self._read_records()
+            if date_str:
+                records = [r for r in records if r.get("date", "") == date_str]
+        else:
+            records = self._read_records()
+
+        if success_only:
+            records = [r for r in records if r.get("success")]
+
+        if rule:
+            records = [r for r in records if r.get("rule", "").find(rule) >= 0]
+
+        if keyword:
+            records = [
+                r for r in records
+                if keyword.lower() in os.path.basename(r.get("original_path", "")).lower()
+                or keyword.lower() in os.path.basename(r.get("new_path", "")).lower()
+                or fnmatch.fnmatch(os.path.basename(r.get("original_path", "")).lower(), f"*{keyword.lower()}*")
+            ]
+
+        if limit and len(records) > limit:
+            records = records[-limit:]
+
+        return records
+
+    def get_available_dates(self) -> List[str]:
+        if not self._daily_rotate:
+            return []
+
+        dirname = os.path.dirname(self._history_file)
+        basename = os.path.basename(self._history_file)
+        name, ext = os.path.splitext(basename)
+        prefix = f"{name}_"
+
+        dates = []
+        if not os.path.isdir(dirname):
+            return []
+
+        for f in os.listdir(dirname):
+            if f.startswith(prefix) and f.endswith(ext):
+                date_part = f[len(prefix):-len(ext)]
+                if len(date_part) == 8 and date_part.isdigit():
+                    dates.append(date_part)
+
+        return sorted(dates)

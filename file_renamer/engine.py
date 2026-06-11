@@ -3,6 +3,7 @@ import re
 import fnmatch
 import logging
 import datetime
+import time
 from typing import List, Optional, Tuple
 
 from .config import Rule, Condition
@@ -21,6 +22,22 @@ COLOR_NAMES_CN = {
     (128, 128, 128): "灰色", (64, 64, 64): "深灰", (0, 0, 0): "黑色",
     (139, 69, 19): "棕色", (160, 82, 45): "褐色", (210, 180, 140): "棕褐",
 }
+
+_TIME_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _parse_time_offset(offset_str: str) -> float:
+    offset_str = offset_str.strip().lower()
+    if offset_str == "":
+        return 0
+
+    pattern = re.compile(r"(\d+)\s*(s|m|h|d)")
+    total = 0.0
+    for match in pattern.finditer(offset_str):
+        value = int(match.group(1))
+        unit = match.group(2)
+        total += value * _TIME_UNITS.get(unit, 0)
+    return total
 
 
 def _get_dominant_color_name(image_path: str) -> str:
@@ -91,6 +108,36 @@ def _check_condition(condition: Condition, filepath: str, filename: str, ext: st
     elif condition.type == "is_image":
         return ext.lower() in IMAGE_EXTENSIONS
 
+    elif condition.type == "file_size":
+        try:
+            stat = os.stat(filepath)
+            size = stat.st_size
+            if condition.min_size is not None and size < condition.min_size:
+                return False
+            if condition.max_size is not None and size > condition.max_size:
+                return False
+            return True
+        except OSError:
+            return False
+
+    elif condition.type == "created_after":
+        try:
+            stat = os.stat(filepath)
+            ctime = stat.st_ctime
+            threshold = time.time() - _parse_time_offset(condition.created_after or "0")
+            return ctime >= threshold
+        except OSError:
+            return False
+
+    elif condition.type == "created_before":
+        try:
+            stat = os.stat(filepath)
+            ctime = stat.st_ctime
+            threshold = time.time() - _parse_time_offset(condition.created_before or "0")
+            return ctime <= threshold
+        except OSError:
+            return False
+
     return False
 
 
@@ -112,8 +159,30 @@ def find_matching_rule(filepath: str, rules: List[Rule]) -> Optional[Rule]:
     return None
 
 
+def preview_file(filepath: str, rules: List[Rule]) -> Optional[dict]:
+    if not os.path.isfile(filepath):
+        return None
+
+    rule = find_matching_rule(filepath, rules)
+    if rule is None:
+        return None
+
+    new_path = generate_new_name(filepath, rule)
+    stat = os.stat(filepath)
+    return {
+        "filepath": filepath,
+        "filename": os.path.basename(filepath),
+        "size": stat.st_size,
+        "created": datetime.datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M:%S"),
+        "rule_name": rule.name,
+        "rule_priority": rule.priority,
+        "new_name": os.path.basename(new_path),
+        "new_path": new_path,
+        "will_change": os.path.normpath(new_path) != os.path.normpath(filepath),
+    }
+
+
 def _resolve_templates(pattern: str, filepath: str) -> str:
-    dirname = os.path.dirname(filepath)
     filename = os.path.basename(filepath)
     name, ext = os.path.splitext(filename)
     now = datetime.datetime.now()
